@@ -38,10 +38,19 @@ default microphone and speakers.
 
 ## Not affiliated
 
-This is an unofficial, independent project. It is not made, endorsed or supported by Max Henkel or
-the Simple Voice Chat project; please don't report its problems to them. "Simple Voice Chat" is
-named only to say which mod and plugin it works with. It contains none of Simple Voice Chat's code:
-everything here is written from scratch in Rust, made to interoperate with its network protocol.
+This is an unofficial project. It is not made, endorsed or supported by Max Henkel or the Simple
+Voice Chat project; please don't report its problems to them. "Simple Voice Chat" is named to say
+which mod and plugin it works with.
+
+## Where the protocol code comes from
+
+This is **not** a clean-room implementation. The mod was written with an AI coding assistant
+(Claude Code), which read [Simple Voice Chat's source](https://github.com/henkelmax/simple-voice-chat)
+on GitHub (its packet classes, `AudioChannel`, `MicThread` and some config defaults) to implement the
+protocol. No code is copied verbatim (this is Rust, Simple Voice Chat is Java), but the protocol and
+audio code follow Simple Voice Chat's implementation, and comments name its classes. Simple Voice Chat
+is "Copyright (c) Max Henkel - All Rights Reserved". If you are its author and want this changed or
+taken down, open an issue and it will be.
 
 ## Build and install
 
@@ -87,5 +96,6 @@ reads the server's custom payloads and the other players' positions inside the g
 
 ## License
 
-MIT, see [LICENSE](LICENSE). Simple Voice Chat itself is not covered by this license and remains its
-author's.
+MIT, see [LICENSE](LICENSE), for the parts that are this project's own work. Simple Voice Chat itself is
+not covered by this license and remains its author's, including whatever of its design the protocol
+code follows (see above).
