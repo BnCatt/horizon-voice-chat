@@ -90,9 +90,63 @@ pub fn place(camera: &Camera, size: [f32; 2], players: &[([f64; 3], String, bool
     placed.into_iter().map(|(_, l)| l).collect()
 }
 
+/// The speaker over a talking player's head: this far above the eyes, and
+/// this big on screen (GUI pixels).
+pub const TALK_ABOVE_EYES: f64 = 0.6;
+pub const TALK_ICON: f32 = 10.0;
+
+/// The speaker icons for `talking` players (eye position, whispering), as
+/// Simple Voice Chat shows one over each player who talks: centred over
+/// the head, the farthest first so the nearest draws on top.
+pub fn talk_icons(camera: &Camera, size: [f32; 2], talking: &[([f64; 3], bool)]) -> Vec<crate::ui::Draw> {
+    use crate::skin::{Icon, icon};
+    let mut placed: Vec<(f64, crate::ui::Draw)> = talking
+        .iter()
+        .filter_map(|(eye, whisper)| {
+            let point = [eye[0], eye[1] + TALK_ABOVE_EYES, eye[2]];
+            let d = sub(point, camera.pos);
+            let distance = dot(d, d).sqrt();
+            if distance > RANGE {
+                return None;
+            }
+            let at = project(camera, point, size)?;
+            let half = TALK_ICON / 2.0;
+            let on_screen = (-half..=size[0] + half).contains(&at[0]) && (-half..=size[1] + half).contains(&at[1]);
+            let which = if *whisper { Icon::Whisper } else { Icon::Speaker };
+            on_screen.then(|| (distance, icon(which, [at[0] - half, at[1] - half, TALK_ICON, TALK_ICON])))
+        })
+        .collect();
+    placed.sort_by(|a, b| b.0.total_cmp(&a.0));
+    placed.into_iter().map(|(_, d)| d).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skin::Icon;
+    use crate::ui::Draw;
+
+    #[test]
+    fn a_speaker_over_whoever_talks_ahead() {
+        let camera = Camera { pos: [0.0, 65.62, 0.0], yaw: 0.0, pitch: 0.0, fov: 70.0 };
+        let size = [400.0, 200.0];
+        let ahead = talk_icons(&camera, size, &[([0.0, 65.62, 5.0], false)]);
+        match ahead.as_slice() {
+            [Draw::Sprite { name, dst, .. }] => {
+                assert_eq!(name, Icon::Speaker.sprite());
+                // Centred over the middle of the screen, above it.
+                assert!((dst[0] + dst[2] / 2.0 - 200.0).abs() < 0.01 && dst[1] + dst[3] / 2.0 < 100.0, "{dst:?}");
+                assert_eq!((dst[2], dst[3]), (10.0, 10.0));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(talk_icons(&camera, size, &[([0.0, 65.62, -5.0], false)]).is_empty());
+        let whisper = talk_icons(&camera, size, &[([0.0, 65.62, 5.0], true)]);
+        assert!(matches!(&whisper[..], [Draw::Sprite { name, .. }] if name == Icon::Whisper.sprite()));
+        // The farther one first.
+        let two = talk_icons(&camera, size, &[([0.0, 65.62, 4.0], false), ([1.0, 65.62, 9.0], true)]);
+        assert!(matches!(&two[0], Draw::Sprite { name, .. } if name == Icon::Whisper.sprite()));
+    }
 
     #[test]
     fn a_player_ahead_gets_a_label_above_the_middle() {

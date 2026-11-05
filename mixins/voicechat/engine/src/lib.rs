@@ -7,11 +7,14 @@
 pub mod audio;
 pub mod buf;
 pub mod crypt;
+pub mod hud;
+pub mod icons;
 pub mod labels;
 pub mod mix;
 pub mod net;
 pub mod opus;
 pub mod proto;
+pub mod skin;
 pub mod ui;
 
 use audio::{AudioIo, Devices, MicQueue};
@@ -25,7 +28,7 @@ use std::time::{Duration, Instant};
 
 pub const ID: &str = "voicechat";
 pub const NAME: &str = "Horizon Voice Chat";
-pub const VERSION: &str = "1.1.0";
+pub const VERSION: &str = "1.2.0";
 pub const DESCRIPTION: &str = "Talk with players who use the Simple Voice Chat mod, on servers that have it (unofficial). \
 V opens the menu: controls, hotkeys and groups. Push to talk (Caps Lock) or voice activation.";
 

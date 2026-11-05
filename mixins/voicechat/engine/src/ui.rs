@@ -4,12 +4,27 @@
 use crate::Settings;
 use crate::net::Mode;
 
-/// What a hook draws, in GUI pixels: a filled `[x, y, w, h]` in ARGB, or a
-/// line of text at its top left in RGB, with or without a shadow.
+/// What a hook draws, in GUI pixels: a filled `[x, y, w, h]` in ARGB, a
+/// line of text at its top left in RGB, with or without a shadow, or the part
+/// `src` (`[x, y, w, h]` in the sprite's own pixels) of an atlas sprite
+/// stretched into `dst`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Draw {
     Fill([f32; 4], u32),
     Text(String, [f32; 2], u32, bool),
+    Sprite { name: String, src: [f32; 4], dst: [f32; 4] },
+}
+
+/// `draws` moved by `[dx, dy]`.
+pub fn translate(draws: Vec<Draw>, d: [f32; 2]) -> Vec<Draw> {
+    draws
+        .into_iter()
+        .map(|draw| match draw {
+            Draw::Fill([x, y, w, h], c) => Draw::Fill([x + d[0], y + d[1], w, h], c),
+            Draw::Text(t, [x, y], c, s) => Draw::Text(t, [x + d[0], y + d[1]], c, s),
+            Draw::Sprite { name, src, dst: [x, y, w, h] } => Draw::Sprite { name, src, dst: [x + d[0], y + d[1], w, h] },
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]
