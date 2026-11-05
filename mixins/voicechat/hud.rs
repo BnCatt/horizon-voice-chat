@@ -1,6 +1,8 @@
-// The voice chat's status in the top left corner (connecting, talking,
-// muted, the group and who is talking), and each player's group above
-// their head, seen from the camera the world was drawn from.
+// The HUD: the voice chat's icon in the bottom left corner (microphone,
+// muted, off, disconnected, whispering) with what doesn't work above it,
+// the group's members in the top left corner, and above players' heads
+// their group and a speaker while they talk, seen from the camera the
+// world was drawn from.
 fn voicechat_hud(
     game: &mut crate::game::Game<'_>,
     batch: &mut horizon_client::hud::HudBatch,
@@ -11,23 +13,36 @@ fn voicechat_hud(
     if !game.native_on(vc::ID) {
         return;
     }
+    let game = &*game;
+    let size = [batch.width, batch.height];
+    let mut draws = Vec::new();
     if let Some((pos, yaw, pitch, fov)) = crate::game::remote::voicechat_world::camera(game) {
         let camera = vc::labels::Camera { pos, yaw, pitch, fov };
-        for label in vc::group_labels(&camera, [batch.width, batch.height]) {
+        for label in vc::group_labels(&camera, size) {
             let w = game.native_text_width(&label.text) + 4.0;
             let [x, y] = [label.at[0] - w / 2.0, label.at[1] - 6.0];
-            game.native_fill(batch, [x, y, w, 12.0], 0x6000_0000);
-            game.native_text(batch, &label.text, [x + 2.0, y + 2.0], label.rgb, true);
+            draws.push(vc::ui::Draw::Fill([x, y, w, 12.0], 0x6000_0000));
+            draws.push(vc::ui::Draw::Text(label.text, [x + 2.0, y + 2.0], label.rgb, true));
         }
+        draws.extend(vc::talk_icons(&camera, size));
     }
-    if !game.native_corner_shown(Corner::TopLeft) {
-        return;
+    let measure = |t: &str| game.native_text_width(t);
+    let hud = vc::hud(size, &measure);
+    draws.extend(hud.status);
+    draws.extend(hud.problems);
+    if !hud.group.is_empty() && game.native_corner_shown(Corner::TopLeft) {
+        let (x, y) = corners.place(Corner::TopLeft, hud.group_size[0], hud.group_size[1]);
+        draws.extend(vc::ui::translate(hud.group, [x, y]));
     }
-    let ptt = game.native_mod_key(vc::ID, vc::KEY_PTT, vc::DEFAULT_PTT);
-    for line in vc::hud(&ptt) {
-        let w = game.native_text_width(&line.text) + 4.0;
-        let (x, y) = corners.place(Corner::TopLeft, w, 12.0);
-        game.native_fill(batch, [x, y, w, 12.0], 0x9000_0000);
-        game.native_text(batch, &line.text, [x + 2.0, y + 2.0], line.rgb, true);
-    }
+    vc::render(&draws, &mut |d| match d {
+        vc::ui::Draw::Fill(rect, argb) => {
+            game.native_fill(batch, *rect, *argb);
+            true
+        }
+        vc::ui::Draw::Text(text, at, rgb, shadow) => {
+            game.native_text(batch, text, *at, *rgb, *shadow);
+            true
+        }
+        vc::ui::Draw::Sprite { name, src, dst } => game.native_sprite(batch, name, *src, *dst),
+    });
 }
