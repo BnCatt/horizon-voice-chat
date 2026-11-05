@@ -1,5 +1,13 @@
 # Horizon Voice Chat
 
+> **This is a maintained fork** of [Nirokx/horizon-voice-chat](https://github.com/Nirokx/horizon-voice-chat)
+> (MIT, original author Nirokx). It builds on current Horizon Nightlies through the native hook points and
+> works on Windows with the bundled `opus.dll`; these changes are also offered upstream
+> ([Nirokx/horizon-voice-chat#2](https://github.com/Nirokx/horizon-voice-chat/pull/2)). Download the
+> `.hnmod`, `opus.dll` and its licence from [Releases](https://github.com/BnCatt/horizon-voice-chat/releases):
+> put the `.hnmod` in `horizon-native-mods/` and `opus.dll` in `horizon-mods/.horizon-mod-data/voicechat/`,
+> then build in the launcher.
+
 A native Horizon mod (Minecraft 26.3, native hook API 409 and later; tested on Horizon Nightly
 2026-11-05, `f319701`) that is a client for
 the [Simple Voice Chat](https://github.com/henkelmax/simple-voice-chat) protocol. It uses the same
