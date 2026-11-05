@@ -10,4 +10,5 @@ publish = false
 [dependencies]
 cpal = "0.16"
 libloading = "0.8"
+log = "0.4"
 ring = "0.17"
