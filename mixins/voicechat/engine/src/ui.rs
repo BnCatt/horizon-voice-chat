@@ -46,6 +46,7 @@ pub enum Action {
     Labels,
     Denoise,
     HideIcons,
+    ChatMessages,
     GroupHud,
     Protocol,
     /// A slider set to a value, 0..=1 along it.

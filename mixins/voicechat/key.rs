@@ -19,6 +19,7 @@ fn voicechat_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
         (vc::Key::Whisper, vc::KEY_WHISPER, vc::DEFAULT_WHISPER),
         (vc::Key::Mute, vc::KEY_MUTE, vc::DEFAULT_MUTE),
         (vc::Key::Disable, vc::KEY_DISABLE, vc::DEFAULT_DISABLE),
+        (vc::Key::HideIcons, vc::KEY_HIDE_ICONS, vc::DEFAULT_HIDE_ICONS),
     ];
     let Some(which) = bound.into_iter().find_map(|(which, name, default)| {
         let chosen = game.native_mod_key(vc::ID, name, default);

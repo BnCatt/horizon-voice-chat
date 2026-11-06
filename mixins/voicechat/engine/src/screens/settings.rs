@@ -82,8 +82,9 @@ pub fn layout(ui: &mut Ui<'_>, view: &View) {
     ui.button([x1, row(4.0), col, 20.0], &text::group_hud(s.hud), Some(Action::GroupHud));
     ui.button([x0, row(5.0), col, 20.0], &text::group_names(s.group_labels), Some(Action::Labels));
     ui.button([x1, row(5.0), col, 20.0], &text::protocol(&view.protocol), Some(Action::Protocol));
+    ui.button([x0, row(6.0), col, 20.0], &text::chat_messages(s.chat_messages), Some(Action::ChatMessages));
 
-    let done_y = (sh - 27.0).max(row(6.0));
+    let done_y = (sh - 27.0).max(row(7.0));
     ui.back([(sw / 2.0 - 100.0).floor(), done_y, 200.0, 20.0], text::DONE);
 }
 

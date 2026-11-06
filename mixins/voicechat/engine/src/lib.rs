@@ -20,6 +20,7 @@ pub mod screens;
 pub mod skin;
 pub mod text;
 pub mod ui;
+pub mod user_icons;
 
 use audio::{AudioIo, Devices, MicQueue};
 use mix::{Listener, Mixer};
@@ -33,9 +34,9 @@ use std::time::{Duration, Instant};
 
 pub const ID: &str = "voicechat";
 pub const NAME: &str = "Horizon Voice Chat";
-pub const VERSION: &str = "1.2.0";
+pub const VERSION: &str = "1.3.0";
 pub const DESCRIPTION: &str = "Talk with players who use the Simple Voice Chat mod, on servers that have it (unofficial). \
-V opens its screens: settings, groups and each player's volume. Push to talk (Caps Lock) or voice activation, with noise suppression when rnnoise.dll is beside libopus.";
+V opens its screens: settings, groups and each player's volume; H hides the icons. Push to talk (Caps Lock) or voice activation, with noise suppression when rnnoise.dll is beside libopus.";
 
 pub const KEY_PTT: &str = "push_to_talk";
 pub const KEY_WHISPER: &str = "whisper";
@@ -47,14 +48,17 @@ pub const DEFAULT_MUTE: &str = "key.keyboard.j";
 pub const DEFAULT_DISABLE: &str = "key.keyboard.k";
 pub const KEY_MENU: &str = "menu";
 pub const DEFAULT_MENU: &str = "key.keyboard.v";
+pub const KEY_HIDE_ICONS: &str = "hide_icons";
+pub const DEFAULT_HIDE_ICONS: &str = "key.keyboard.h";
 
 /// The mod's keys: their name, what they do, and their default.
-pub const HOTKEYS: [(&str, &str, &str); 5] = [
+pub const HOTKEYS: [(&str, &str, &str); 6] = [
     (KEY_MENU, "Open voice chat", DEFAULT_MENU),
     (KEY_PTT, "Push to talk", DEFAULT_PTT),
     (KEY_WHISPER, "Whisper", DEFAULT_WHISPER),
     (KEY_MUTE, "Mute microphone", DEFAULT_MUTE),
     (KEY_DISABLE, "Voice chat off / on", DEFAULT_DISABLE),
+    (KEY_HIDE_ICONS, "Hide icons", DEFAULT_HIDE_ICONS),
 ];
 
 /// A player's eyes above their feet (`Player.getEyeHeight`, standing).
@@ -76,6 +80,7 @@ pub enum Key {
     Whisper,
     Mute,
     Disable,
+    HideIcons,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +106,8 @@ pub struct Settings {
     pub denoise: bool,
     /// No status icon, and no speakers over heads.
     pub hide_icons: bool,
+    /// Its lines in the chat (mute, voice chat off/on, groups, errors).
+    pub chat_messages: bool,
     /// The devices chosen by name; None: the system's default.
     pub mic_device: Option<String>,
     pub speaker_device: Option<String>,
@@ -120,6 +127,7 @@ impl Default for Settings {
             group_labels: true,
             denoise: true,
             hide_icons: false,
+            chat_messages: true,
             mic_device: None,
             speaker_device: None,
         }
@@ -155,6 +163,7 @@ impl Settings {
             group_labels: get("group_labels").as_deref() != Some("false"),
             denoise: get("denoise").as_deref() != Some("false"),
             hide_icons: get("hide_icons").as_deref() == Some("true"),
+            chat_messages: get("chat_messages").as_deref() != Some("false"),
             mic_device: get("mic_device").filter(|n| !n.is_empty()),
             speaker_device: get("speaker_device").filter(|n| !n.is_empty()),
         }
@@ -178,6 +187,7 @@ impl Settings {
             ("group_labels", self.group_labels.to_string()),
             ("denoise", self.denoise.to_string()),
             ("hide_icons", self.hide_icons.to_string()),
+            ("chat_messages", self.chat_messages.to_string()),
             ("mic_device", self.mic_device.clone().unwrap_or_default()),
             ("speaker_device", self.speaker_device.clone().unwrap_or_default()),
         ]
@@ -206,6 +216,7 @@ impl Settings {
             format!("Group names above players: {}", on_off(self.group_labels)),
             format!("Noise suppression: {}", on_off(self.denoise)),
             format!("Hide icons: {}", on_off(self.hide_icons)),
+            format!("Chat messages: {}", on_off(self.chat_messages)),
         ]
     }
 
@@ -228,6 +239,7 @@ impl Settings {
             8 => self.group_labels = !self.group_labels,
             9 => self.denoise = !self.denoise,
             10 => self.hide_icons = !self.hide_icons,
+            11 => self.chat_messages = !self.chat_messages,
             _ => {}
         }
     }
@@ -379,6 +391,11 @@ impl Voice {
         c.mic_gain = s.mic_gain as f32 / 100.0;
         c.threshold_db = s.threshold as f32;
         c.denoise = s.denoise;
+    }
+
+    /// A toggle's line for the chat, unless chat messages are off.
+    fn say(&self, line: &str) -> Option<String> {
+        self.settings.chat_messages.then(|| line.to_owned())
     }
 
     fn save(&mut self) {
@@ -587,7 +604,10 @@ pub fn tick(world: Option<World>, get: &dyn Fn(&str) -> Option<String>) -> Tick 
     Tick {
         payloads: std::mem::take(&mut v.outbox),
         store: std::mem::take(&mut v.store),
-        chat: std::mem::take(&mut v.chat),
+        chat: {
+            let lines = std::mem::take(&mut v.chat);
+            if v.settings.chat_messages { lines } else { Vec::new() }
+        },
     }
 }
 
@@ -617,7 +637,7 @@ pub fn key(which: Key, down: bool) -> Option<String> {
             v.settings.muted = !v.settings.muted;
             v.save();
             v.send_state();
-            return Some(if v.settings.muted { "Microphone muted" } else { "Microphone on" }.into());
+            return v.say(if v.settings.muted { "Microphone muted" } else { "Microphone on" });
         }
         Key::Disable if down => {
             v.settings.disabled = !v.settings.disabled;
@@ -626,7 +646,11 @@ pub fn key(which: Key, down: bool) -> Option<String> {
             if v.settings.disabled {
                 v.mixer.lock().unwrap().clear();
             }
-            return Some(if v.settings.disabled { "Voice chat off" } else { "Voice chat on" }.into());
+            return v.say(if v.settings.disabled { "Voice chat off" } else { "Voice chat on" });
+        }
+        Key::HideIcons if down => {
+            v.settings.hide_icons = !v.settings.hide_icons;
+            v.save();
         }
         _ => {}
     }
@@ -790,6 +814,7 @@ impl Voice {
             A::Labels => self.click(8),
             A::Denoise => self.click(9),
             A::HideIcons => self.click(10),
+            A::ChatMessages => self.click(11),
             A::Slide(slider, v) => self.slide(slider, v),
             A::Device(kind, name) => {
                 match kind {

@@ -77,6 +77,10 @@ pub fn hide_icons(on: bool) -> String {
     format!("Hide Icons: {}", on_off(on))
 }
 
+pub fn chat_messages(on: bool) -> String {
+    format!("Chat Messages: {}", on_off(on))
+}
+
 pub fn group_hud(on: bool) -> String {
     format!("Group HUD: {}", on_off(on))
 }

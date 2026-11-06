@@ -23,7 +23,8 @@ speaker over the head of whoever is talking.
 - **Settings**: voice volume (0-200 %), microphone amplification (0-500 %) and the voice activation
   threshold as sliders (the threshold with a live microphone meter behind it), push to talk or voice
   activation, **noise suppression** (rnnoise), the microphone and the speakers by name (or the
-  system's default), hide icons, the group list on screen, group names above players, the protocol.
+  system's default), hide icons, chat messages (the mod's lines in the chat: mute, voice chat
+  off/on, groups, errors), the group list on screen, group names above players, the protocol.
 - **Groups**: the server's groups, a lock on those with a password and the member count (the members
   in a tooltip); **Join** (a password group asks for its password in the row), **Leave** for yours, and
   **Create Group...** (name, optional password, type). The wheel scrolls; long names are cut with "…".
@@ -31,7 +32,8 @@ speaker over the head of whoever is talking.
 - **Talking**: hold **Caps Lock** (push to talk), or switch to voice activation. Voices come from where
   the players stand: they get quieter with distance and pan left or right, as the Java mod's do.
 - **Keys** (Options > Mods > Horizon Voice Chat): voice chat (V), push to talk (Caps Lock), whisper (not
-  bound), mute the microphone (J), voice chat off/on (K).
+  bound), mute the microphone (J), voice chat off/on (K), hide icons (H: the status icon and the
+  speakers over heads).
 - **On screen**: the status icon (bottom left: microphone, muted, off, disconnected, whispering), what
   doesn't work above it in red, your group's members (top left, a speaker by whoever is talking), each
   player's group above their head (`[Builders]`; yours in green) and a speaker above it while they talk.
@@ -53,6 +55,11 @@ microphone goes out as it is). It looks for both in its own data folder first
 `libopus.0.dylib`/`librnnoise.0.dylib` on macOS, `libopus.so.0`/`librnnoise.so.0` on Linux), then the
 system's. Windows has neither: build them with `tools/build_opus.py` and `tools/build_rnnoise.py`
 (below) and put them in that folder.
+
+**Your own icons**: PNGs in `horizon-mods/.horizon-mod-data/voicechat/icons/` (`microphone`,
+`microphone_off`, `speaker`, `speaker_off`, `whisper`, `disconnected`, `group`, `settings`, `lock`; any
+square size up to 256) are drawn instead of the mod's own, for example the icons of a resource pack you
+own. The mod ships none of anyone else's.
 
 ## Not affiliated
 

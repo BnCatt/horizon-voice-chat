@@ -312,7 +312,7 @@ pub fn fallback_all(d: &Draw) -> Vec<Draw> {
         return vec![d.clone()];
     };
     match Icon::from_sprite(name) {
-        Some(i) => icons::fills(i, *src, *dst),
+        Some(i) => crate::user_icons::fills(i, *src, *dst).unwrap_or_else(|| icons::fills(i, *src, *dst)),
         None => vec![fallback(d)],
     }
 }
