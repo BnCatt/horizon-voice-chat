@@ -7,27 +7,35 @@
 pub mod audio;
 pub mod buf;
 pub mod crypt;
+pub mod denoise;
+pub mod dylib;
+pub mod hud;
+pub mod icons;
 pub mod labels;
 pub mod mix;
 pub mod net;
 pub mod opus;
 pub mod proto;
+pub mod screens;
+pub mod skin;
+pub mod text;
 pub mod ui;
 
 use audio::{AudioIo, Devices, MicQueue};
 use mix::{Listener, Mixer};
 use net::{Conn, Mode, Redirect, Shared, Status};
 use proto::{COMPAT_26, COMPAT_27, Group, PlayerState, Secret};
-use std::collections::HashMap;
+use screens::{DeviceKind, Screen};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 pub const ID: &str = "voicechat";
 pub const NAME: &str = "Horizon Voice Chat";
-pub const VERSION: &str = "1.1.0";
+pub const VERSION: &str = "1.2.0";
 pub const DESCRIPTION: &str = "Talk with players who use the Simple Voice Chat mod, on servers that have it (unofficial). \
-V opens the menu: controls, hotkeys and groups. Push to talk (Caps Lock) or voice activation.";
+V opens its screens: settings, groups and each player's volume. Push to talk (Caps Lock) or voice activation, with noise suppression when rnnoise.dll is beside libopus.";
 
 pub const KEY_PTT: &str = "push_to_talk";
 pub const KEY_WHISPER: &str = "whisper";
@@ -42,7 +50,7 @@ pub const DEFAULT_MENU: &str = "key.keyboard.v";
 
 /// The mod's keys: their name, what they do, and their default.
 pub const HOTKEYS: [(&str, &str, &str); 5] = [
-    (KEY_MENU, "Open this menu", DEFAULT_MENU),
+    (KEY_MENU, "Open voice chat", DEFAULT_MENU),
     (KEY_PTT, "Push to talk", DEFAULT_PTT),
     (KEY_WHISPER, "Whisper", DEFAULT_WHISPER),
     (KEY_MUTE, "Mute microphone", DEFAULT_MUTE),
@@ -89,6 +97,13 @@ pub struct Settings {
     pub protocol: Protocol,
     pub hud: bool,
     pub group_labels: bool,
+    /// Noise suppression (rnnoise) on the microphone.
+    pub denoise: bool,
+    /// No status icon, and no speakers over heads.
+    pub hide_icons: bool,
+    /// The devices chosen by name; None: the system's default.
+    pub mic_device: Option<String>,
+    pub speaker_device: Option<String>,
 }
 
 impl Default for Settings {
@@ -103,6 +118,10 @@ impl Default for Settings {
             protocol: Protocol::Auto,
             hud: true,
             group_labels: true,
+            denoise: true,
+            hide_icons: false,
+            mic_device: None,
+            speaker_device: None,
         }
     }
 }
@@ -125,7 +144,7 @@ impl Settings {
             muted: get("muted").as_deref() == Some("true"),
             disabled: get("disabled").as_deref() == Some("true"),
             volume: num("volume").map_or(d.volume, |v| v.clamp(0, 200) as u32),
-            mic_gain: num("mic_gain").map_or(d.mic_gain, |v| v.clamp(10, 500) as u32),
+            mic_gain: num("mic_gain").map_or(d.mic_gain, |v| v.clamp(0, 500) as u32),
             threshold: num("threshold").map_or(d.threshold, |v| v.clamp(-127, 0) as i32),
             protocol: match get("protocol").as_deref() {
                 Some("2.6") => Protocol::V26,
@@ -134,6 +153,10 @@ impl Settings {
             },
             hud: get("hud").as_deref() != Some("false"),
             group_labels: get("group_labels").as_deref() != Some("false"),
+            denoise: get("denoise").as_deref() != Some("false"),
+            hide_icons: get("hide_icons").as_deref() == Some("true"),
+            mic_device: get("mic_device").filter(|n| !n.is_empty()),
+            speaker_device: get("speaker_device").filter(|n| !n.is_empty()),
         }
     }
 
@@ -153,7 +176,19 @@ impl Settings {
             .into()),
             ("hud", self.hud.to_string()),
             ("group_labels", self.group_labels.to_string()),
+            ("denoise", self.denoise.to_string()),
+            ("hide_icons", self.hide_icons.to_string()),
+            ("mic_device", self.mic_device.clone().unwrap_or_default()),
+            ("speaker_device", self.speaker_device.clone().unwrap_or_default()),
         ]
+    }
+
+    pub fn protocol_name(&self) -> &'static str {
+        match self.protocol {
+            Protocol::Auto => "Automatic",
+            Protocol::V26 => "2.6.x",
+            Protocol::V27 => "2.7",
+        }
     }
 
     /// The settings page's buttons, in order.
@@ -166,13 +201,11 @@ impl Settings {
             format!("Voice volume: {}%", self.volume),
             format!("Microphone gain: {}%", self.mic_gain),
             format!("Voice activation level: {} dB", self.threshold),
-            format!("Protocol: {}", match self.protocol {
-                Protocol::Auto => "Automatic",
-                Protocol::V26 => "2.6.x",
-                Protocol::V27 => "2.7",
-            }),
-            format!("Status on screen: {}", on_off(self.hud)),
+            format!("Protocol: {}", self.protocol_name()),
+            format!("Group list on screen: {}", on_off(self.hud)),
             format!("Group names above players: {}", on_off(self.group_labels)),
+            format!("Noise suppression: {}", on_off(self.denoise)),
+            format!("Hide icons: {}", on_off(self.hide_icons)),
         ]
     }
 
@@ -193,6 +226,8 @@ impl Settings {
             }
             7 => self.hud = !self.hud,
             8 => self.group_labels = !self.group_labels,
+            9 => self.denoise = !self.denoise,
+            10 => self.hide_icons = !self.hide_icons,
             _ => {}
         }
     }
@@ -246,11 +281,6 @@ impl Session {
         names
     }
 
-    fn own_name(&self) -> String {
-        let own = self.secret.as_ref().map(|s| s.player);
-        own.and_then(|id| self.states.get(&id)).map(|p| p.name.clone()).unwrap_or_default()
-    }
-
     fn compat(&self) -> i32 {
         self.secret.as_ref().map_or(COMPAT_26, |s| s.compat)
     }
@@ -283,7 +313,11 @@ struct Voice {
     mic: Arc<MicQueue>,
     devices: Arc<Mutex<Devices>>,
     redirect: Option<Redirect>,
-    menu: ui::Menu,
+    menu: ui::Screens,
+    /// The sound card's devices of the kind being chosen.
+    device_list: Vec<String>,
+    /// Players whose stored volume was looked up.
+    volumes_loaded: HashSet<u128>,
 }
 
 fn voice() -> MutexGuard<'static, Voice> {
@@ -300,7 +334,9 @@ fn voice() -> MutexGuard<'static, Voice> {
             mic: Arc::default(),
             devices: Arc::new(Mutex::new(Devices::default())),
             redirect: None,
-            menu: ui::Menu::default(),
+            menu: ui::Screens::default(),
+            device_list: Vec::new(),
+            volumes_loaded: HashSet::new(),
         })
     });
     VOICE.lock().unwrap_or_else(|e| e.into_inner())
@@ -342,6 +378,7 @@ impl Voice {
         c.volume = s.volume as f32 / 100.0;
         c.mic_gain = s.mic_gain as f32 / 100.0;
         c.threshold_db = s.threshold as f32;
+        c.denoise = s.denoise;
     }
 
     fn save(&mut self) {
@@ -404,7 +441,13 @@ impl Voice {
             self.mic.clone(),
         ));
         if session.audio.is_none() && SOUND_CARD.load(Ordering::Relaxed) {
-            session.audio = Some(AudioIo::start(self.mixer.clone(), self.mic.clone(), self.devices.clone()));
+            session.audio = Some(AudioIo::start(
+                self.mixer.clone(),
+                self.mic.clone(),
+                self.devices.clone(),
+                self.settings.mic_device.clone(),
+                self.settings.speaker_device.clone(),
+            ));
         }
         self.send_state();
     }
@@ -486,6 +529,7 @@ impl Voice {
             *self.shared.listener.lock().unwrap() = l;
         }
         *self.shared.players.lock().unwrap() = world.players.into_iter().collect();
+        self.load_player_volumes(get);
 
         let protocol = self.settings.protocol;
         let session = self.session.as_mut().expect("made above");
@@ -508,6 +552,22 @@ impl Voice {
             session.asked.clear();
             session.next_ask = now + Duration::from_secs(5);
             session.remembered = Some(compat);
+        }
+    }
+
+    /// The volumes stored for players seen for the first time.
+    fn load_player_volumes(&mut self, get: &dyn Fn(&str) -> Option<String>) {
+        let Some(session) = self.session.as_ref() else { return };
+        let new: Vec<u128> = session.states.keys().filter(|id| !self.volumes_loaded.contains(id)).copied().collect();
+        if new.is_empty() {
+            return;
+        }
+        let mut c = self.shared.controls.lock().unwrap();
+        for id in new {
+            self.volumes_loaded.insert(id);
+            if let Some(p) = get(&volume_key(id)).and_then(|v| v.parse::<u32>().ok()) {
+                c.player_volumes.insert(id, p.min(screens::PLAYER_MAX as u32) as f32 / 100.0);
+            }
         }
     }
 }
@@ -581,6 +641,12 @@ pub fn settings_click(button: usize) {
     voice().click(button);
 }
 
+/// The key a player's own volume is kept under: `volume.<uuid>`.
+pub fn volume_key(id: u128) -> String {
+    let h = format!("{id:032x}");
+    format!("volume.{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+}
+
 impl Voice {
     fn click(&mut self, button: usize) {
         let before = (self.settings.muted, self.settings.disabled);
@@ -588,6 +654,24 @@ impl Voice {
         self.save();
         if before != (self.settings.muted, self.settings.disabled) {
             self.send_state();
+        }
+        if self.settings.disabled {
+            self.mixer.lock().unwrap().clear();
+        }
+    }
+
+    /// The sound card again, with the devices chosen now.
+    fn restart_audio(&mut self) {
+        let Some(session) = self.session.as_mut() else { return };
+        if session.audio.is_some() {
+            session.audio = None;
+            session.audio = Some(AudioIo::start(
+                self.mixer.clone(),
+                self.mic.clone(),
+                self.devices.clone(),
+                self.settings.mic_device.clone(),
+                self.settings.speaker_device.clone(),
+            ));
         }
     }
 
@@ -609,7 +693,7 @@ impl Voice {
         }
     }
 
-    fn view(&self, hotkeys: Vec<(String, String)>) -> ui::View {
+    fn view(&self) -> ui::View {
         let session = self.session.as_ref();
         let connected = session.is_some_and(|s| s.secret.is_some())
             && *self.shared.status.lock().unwrap() == Status::Connected;
@@ -630,6 +714,22 @@ impl Voice {
             .unwrap_or_default();
         // Yours first, then by name.
         groups.sort_by_key(|g| (!g.ours, g.name.to_lowercase()));
+        let volumes = self.shared.controls.lock().unwrap().player_volumes.clone();
+        let own = session.and_then(|s| s.secret.as_ref()).map(|s| s.player);
+        let mut players: Vec<ui::PlayerRow> = session
+            .map(|s| {
+                s.states
+                    .values()
+                    .filter(|p| !p.disconnected && Some(p.uuid) != own)
+                    .map(|p| ui::PlayerRow {
+                        id: p.uuid,
+                        name: p.name.clone(),
+                        volume: (volumes.get(&p.uuid).copied().unwrap_or(1.0) * 100.0).round() as u32,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        players.sort_by_key(|p| p.name.to_lowercase());
         ui::View {
             status: self.status_line(),
             settings: self.settings.clone(),
@@ -637,13 +737,46 @@ impl Voice {
             connected,
             groups_enabled: session.and_then(|s| s.secret.as_ref()).is_some_and(|s| s.groups),
             groups,
-            hotkeys,
+            players,
+            devices: self.device_list.clone(),
+            denoise: denoise::available(),
+            protocol: self.settings.protocol_name().into(),
         }
     }
 
-    /// What a click or Enter in the menu asks of the voice chat.
+    /// A slider moved: the setting follows at once; it is stored when the
+    /// button comes up ([`Voice::store_slider`]).
+    fn slide(&mut self, slider: ui::Slider, v: f32) {
+        use ui::Slider as S;
+        match slider {
+            S::Volume => self.settings.volume = screens::volume_of(v),
+            S::Gain => self.settings.mic_gain = screens::gain_of(v),
+            S::Threshold => self.settings.threshold = screens::threshold_of(v),
+            S::Player(id) => {
+                let percent = screens::player_of(v);
+                self.volumes_loaded.insert(id);
+                self.shared.controls.lock().unwrap().player_volumes.insert(id, percent as f32 / 100.0);
+            }
+        }
+        self.apply_controls();
+    }
+
+    fn store_slider(&mut self, slider: ui::Slider) {
+        match slider {
+            ui::Slider::Player(id) => {
+                let v = self.shared.controls.lock().unwrap().player_volumes.get(&id).copied().unwrap_or(1.0);
+                self.store.push((volume_key(id), ((v * 100.0).round() as u32).to_string()));
+            }
+            _ => self.save(),
+        }
+    }
+
+    /// What a click or Enter on the screens asks of the voice chat.
     fn menu_action(&mut self, action: ui::Action) {
         use ui::Action as A;
+        if let A::Open(Screen::Devices(kind)) = action {
+            self.device_list = if SOUND_CARD.load(Ordering::Relaxed) { audio::device_names(kind) } else { Vec::new() };
+        }
         let Some(action) = self.menu.act(action) else { return };
         let group_name = |v: &Voice, id: u128| {
             v.session.as_ref().and_then(|s| s.groups.get(&id)).map(|g| (g.name.clone(), g.has_password))
@@ -652,18 +785,20 @@ impl Voice {
             A::Mode => self.click(0),
             A::Mute => self.click(1),
             A::Disable => self.click(2),
+            A::Protocol => self.click(6),
+            A::GroupHud => self.click(7),
             A::Labels => self.click(8),
-            A::Volume(d) => {
-                self.settings.volume = (self.settings.volume as i32 + d).clamp(0, 200) as u32;
+            A::Denoise => self.click(9),
+            A::HideIcons => self.click(10),
+            A::Slide(slider, v) => self.slide(slider, v),
+            A::Device(kind, name) => {
+                match kind {
+                    DeviceKind::Input => self.settings.mic_device = name,
+                    DeviceKind::Output => self.settings.speaker_device = name,
+                }
                 self.save();
-            }
-            A::Gain(d) => {
-                self.settings.mic_gain = (self.settings.mic_gain as i32 + d).clamp(25, 500) as u32;
-                self.save();
-            }
-            A::Threshold(d) => {
-                self.settings.threshold = (self.settings.threshold + d).clamp(-80, 0);
-                self.save();
+                self.restart_audio();
+                self.menu.pop();
             }
             A::Join(id) => match group_name(self, id) {
                 Some((_, true)) => {
@@ -711,6 +846,10 @@ impl Voice {
                 self.send(proto::create_group(&name, password.as_deref(), self.menu.kind));
                 self.menu.name.clear();
                 self.menu.focus = None;
+                // Back to the groups, where the new one shows up.
+                if self.menu.top() == Some(&Screen::CreateGroup) {
+                    self.menu.pop();
+                }
                 self.menu.say(format!("Creating {name}..."), false);
             }
             _ => {}
@@ -718,46 +857,68 @@ impl Voice {
     }
 }
 
-/// Opens the menu, opened by a key typing `opened_by`.
+/// Opens the voice chat's screens, opened by a key typing `opened_by`.
 pub fn menu_open(opened_by: Option<char>) {
     voice().menu.open(opened_by);
 }
 
 pub fn menu_is_open() -> bool {
-    voice().menu.open
+    voice().menu.is_open()
 }
 
-/// The game's screen is (`ours`) or isn't the menu.
+/// The game's screen is (`ours`) or isn't the voice chat's.
 pub fn menu_sync(ours: bool) {
     voice().menu.sync_open(ours);
 }
 
-/// Whether the game should close the menu now (once).
+/// Whether the game should close the screens now (once).
 pub fn menu_take_close() -> bool {
     voice().menu.take_close()
 }
 
-/// Draws the menu; `hotkeys` are what each key does and its key's name.
-pub fn menu_draw(
-    size: [f32; 2],
-    mouse: [f32; 2],
-    measure: &dyn Fn(&str) -> f32,
-    hotkeys: Vec<(String, String)>,
-) -> Vec<ui::Draw> {
+/// Draws the screen on top of the stack.
+pub fn menu_draw(size: [f32; 2], mouse: [f32; 2], measure: &dyn Fn(&str) -> f32) -> Vec<ui::Draw> {
     let mut v = voice();
-    let view = v.view(hotkeys);
-    v.menu.draw(&view, size, mouse, measure)
+    let Some(screen) = v.menu.top().copied() else {
+        return Vec::new();
+    };
+    let view = v.view();
+    let (draws, widgets) = screens::layout(&screen, &v.menu, &view, size, mouse, measure);
+    v.menu.set_widgets(widgets);
+    draws
 }
 
+/// The left button went down at `at`.
 pub fn menu_click(at: [f32; 2]) {
     let mut v = voice();
-    if let Some(action) = v.menu.hit(at) {
+    if let Some(action) = v.menu.press(at) {
         v.menu_action(action);
     }
 }
 
-/// A key on the menu: `menu_key` (the open key) closes it unless a field
-/// takes the typing.
+/// The pointer moved with the button down: a slider being dragged follows.
+/// True when one is (the game should not drag anything else).
+pub fn menu_drag(at: [f32; 2]) -> bool {
+    let mut v = voice();
+    match v.menu.drag(at) {
+        Some(action) => {
+            v.menu_action(action);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The button came up: a dragged slider's value is stored.
+pub fn menu_release() {
+    let mut v = voice();
+    if let Some(slider) = v.menu.release() {
+        v.store_slider(slider);
+    }
+}
+
+/// A key on the screens: `menu_key` (the open key) closes them unless a
+/// field takes the typing.
 pub fn menu_key(key: &str, shift: bool, menu_key: &str) {
     let mut v = voice();
     if key == menu_key && !v.menu.typing() {
@@ -801,89 +962,109 @@ pub fn take_store() -> Vec<(String, String)> {
     std::mem::take(&mut voice().store)
 }
 
-/// A line of the status the HUD shows, and its colour.
-pub struct Line {
-    pub text: String,
-    pub rgb: u32,
+/// Draws `draws` with `paint` (the game's fill, text and sprite helpers;
+/// false when the atlas has no such sprite). A missing sprite is drawn as a
+/// stand-in instead: the mod's icons from their compiled-in pixels, vanilla
+/// sprites as plain fills (named in the log once).
+pub fn render(draws: &[ui::Draw], paint: &mut dyn FnMut(&ui::Draw) -> bool) {
+    static WARNED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
+    for d in draws {
+        if paint(d) {
+            continue;
+        }
+        if let ui::Draw::Sprite { name, .. } = d
+            && skin::Icon::from_sprite(name).is_none()
+            && WARNED.lock().unwrap_or_else(|e| e.into_inner()).insert(name.clone())
+        {
+            log::warn!(target: "horizon_voicechat", "Voice Chat: no sprite {name} in the GUI atlas, drawing a plain stand-in");
+        }
+        for f in skin::fallback_all(d) {
+            paint(&f);
+        }
+    }
 }
 
-const WHITE: u32 = 0xFFFFFF;
 const GREY: u32 = 0xAAAAAA;
 const GREEN: u32 = 0x55FF55;
-const AQUA: u32 = 0x55FFFF;
 const RED: u32 = 0xFF5555;
 const YELLOW: u32 = 0xFFFF55;
 
-/// The status for the HUD, top line first: nothing on a server without
-/// voice chat.
-pub fn hud(ptt_key: &str) -> Vec<Line> {
+/// What the HUD draws this frame.
+#[derive(Default)]
+pub struct Hud {
+    /// The status icon, bottom left.
+    pub status: Vec<ui::Draw>,
+    /// What doesn't work, above it.
+    pub problems: Vec<ui::Draw>,
+    /// The group's members, laid out from (0, 0), and the room they take.
+    pub group: Vec<ui::Draw>,
+    pub group_size: [f32; 2],
+}
+
+/// How long after a voice packet a player still counts as talking.
+const TALKING: Duration = Duration::from_millis(300);
+
+/// The HUD on a `size` screen: nothing on a server without voice chat.
+pub fn hud(size: [f32; 2], measure: &dyn Fn(&str) -> f32) -> Hud {
     let v = voice();
-    let Some(session) = v.session.as_ref().filter(|_| v.settings.hud) else {
-        return Vec::new();
+    let Some(session) = v.session.as_ref().filter(|s| s.secret.is_some()) else {
+        return Hud::default();
     };
-    if session.secret.is_none() {
-        return Vec::new();
-    }
-    let mut lines = Vec::new();
-    let line = |text: String, rgb| Line { text, rgb };
     let status = v.shared.status.lock().unwrap().clone();
-    match status {
-        Status::Connected => {}
-        Status::Failed(ref e) => lines.push(line(format!("Voice chat: {e}"), RED)),
-        _ => lines.push(line("Voice chat: connecting...".into(), YELLOW)),
+    let whisper = v.shared.controls.lock().unwrap().whisper;
+    let transmitting = v.shared.transmitting.load(Ordering::Relaxed);
+    let mut out = Hud::default();
+    if !v.settings.hide_icons {
+        let state = hud::HudState {
+            connected: status == Status::Connected,
+            muted: v.settings.muted,
+            disabled: v.settings.disabled,
+            transmitting,
+            whispering: whisper,
+        };
+        out.status = hud::status_icon(&state, size);
+    }
+    let mut problems = Vec::new();
+    if let Status::Failed(e) = &status {
+        problems.push(format!("Voice chat: {e}"));
     }
     if let Some(e) = v.shared.mic_error.lock().unwrap().as_ref() {
-        lines.push(line(format!("Voice chat: {e}"), RED));
+        problems.push(format!("Voice chat: {e}"));
     }
-    if let Err(e) = &v.devices.lock().unwrap().input
-        && e != "not open"
     {
-        lines.push(line(format!("Microphone: {e}"), RED));
-    }
-    if let Err(e) = &v.devices.lock().unwrap().output
-        && e != "not open"
-    {
-        lines.push(line(format!("Speakers: {e}"), RED));
-    }
-    if v.settings.disabled {
-        lines.push(line("Voice chat off".into(), RED));
-    } else if v.settings.muted {
-        lines.push(line("Microphone muted".into(), RED));
-    } else if v.shared.transmitting.load(Ordering::Relaxed) {
-        let whisper = v.shared.controls.lock().unwrap().whisper;
-        lines.push(if whisper { line("Whispering".into(), AQUA) } else { line("Talking".into(), GREEN) });
-    } else if status == Status::Connected {
-        lines.push(match v.settings.mode {
-            Mode::PushToTalk => line(format!("Push to talk: {}", key_label(ptt_key)), GREY),
-            Mode::Voice => line(format!("Voice activation ({:.0} dB)", v.shared.level()), GREY),
-        });
-    }
-    if let Some(g) = session.group.and_then(|g| session.groups.get(&g)) {
-        lines.push(line(format!("Group: {}", g.name), GREEN));
-        let mut members = session.members(g.id);
-        members.retain(|m| *m != session.own_name());
-        if !members.is_empty() {
-            lines.push(line(format!("  with {}", members.join(", ")), GREY));
+        let d = v.devices.lock().unwrap();
+        if let Err(e) = &d.input
+            && e != "not open"
+        {
+            problems.push(format!("Microphone: {e}"));
+        }
+        if let Err(e) = &d.output
+            && e != "not open"
+        {
+            problems.push(format!("Speakers: {e}"));
         }
     }
-    let now = Instant::now();
-    let mut talking: Vec<(String, bool)> = v
-        .shared
-        .talking
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(_, (at, _))| now - *at < Duration::from_millis(300))
-        .map(|(id, (_, whisper))| {
-            let name = session.states.get(id).map_or_else(|| "Someone".into(), |s| s.name.clone());
-            (name, *whisper)
-        })
-        .collect();
-    talking.sort();
-    for (name, whisper) in talking {
-        lines.push(line(format!("> {name}"), if whisper { AQUA } else { WHITE }));
+    out.problems = hud::problems(&problems, size, measure);
+    if v.settings.hud
+        && let Some(g) = session.group
+    {
+        let now = Instant::now();
+        let talking = v.shared.talking.lock().unwrap();
+        let own = session.secret.as_ref().map(|s| s.player);
+        let mut members: Vec<(String, bool)> = session
+            .states
+            .values()
+            .filter(|p| p.group == Some(g) && !p.disconnected)
+            .map(|p| {
+                let heard = talking.get(&p.uuid).is_some_and(|(at, _)| now - *at < TALKING);
+                (p.name.clone(), heard || (Some(p.uuid) == own && transmitting))
+            })
+            .collect();
+        members.sort_by_key(|(n, _)| n.to_lowercase());
+        out.group_size = hud::group_list_size(&members, measure);
+        out.group = hud::group_list(&members, size, measure);
     }
-    lines
+    out
 }
 
 /// The group names to draw above the players the camera sees, on a `size`
@@ -897,13 +1078,44 @@ pub fn group_labels(camera: &labels::Camera, size: [f32; 2]) -> Vec<labels::Labe
     let shown: Vec<([f64; 3], String, bool)> = players
         .iter()
         .filter_map(|(id, eye)| {
-            let group = session.states.get(id)?.group?;
-            // Hidden groups stay hidden, unless they are the player's own.
-            let g = session.groups.get(&group).filter(|g| !g.hidden || session.group == Some(group))?;
-            Some((*eye, g.name.clone(), session.group == Some(group)))
+            let (name, ours) = shown_group(session, *id)?;
+            Some((*eye, name, ours))
         })
         .collect();
     labels::place(camera, size, &shown)
+}
+
+/// The group shown above player `id`, and whether it is the player's own:
+/// hidden groups stay hidden, unless they are the player's own.
+fn shown_group(session: &Session, id: u128) -> Option<(String, bool)> {
+    let group = session.states.get(&id)?.group?;
+    let g = session.groups.get(&group).filter(|g| !g.hidden || session.group == Some(group))?;
+    Some((g.name.clone(), session.group == Some(group)))
+}
+
+/// The speakers over the heads of the players talking now, as the camera
+/// sees them.
+pub fn talk_icons(camera: &labels::Camera, size: [f32; 2]) -> Vec<ui::Draw> {
+    let v = voice();
+    let Some(session) = v.session.as_ref().filter(|s| !v.settings.hide_icons && s.secret.is_some()) else {
+        return Vec::new();
+    };
+    let now = Instant::now();
+    let players = v.shared.players.lock().unwrap();
+    let talking: Vec<([f64; 3], bool, bool)> = v
+        .shared
+        .talking
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, (at, _))| now - *at < TALKING)
+        .filter_map(|(id, (_, whisper))| {
+            let eye = players.get(id)?;
+            let labelled = v.settings.group_labels && shown_group(session, *id).is_some();
+            Some((*eye, labelled, *whisper))
+        })
+        .collect();
+    labels::talk_icons(camera, size, &talking)
 }
 
 /// `key.keyboard.caps.lock` → `Caps Lock`.
@@ -989,6 +1201,8 @@ pub fn command(line: &str) -> Option<Vec<String>> {
             match id {
                 Some(id) => {
                     v.shared.controls.lock().unwrap().player_volumes.insert(id, n as f32 / 100.0);
+                    v.volumes_loaded.insert(id);
+                    v.store.push((volume_key(id), n.to_string()));
                     vec![format!("{name}'s voice at {n}%")]
                 }
                 None => vec![format!("No voice chat player named {name}")],
@@ -1180,8 +1394,10 @@ mod tests {
         assert_eq!(texts, vec![("[Miners]", 0xFFFF55), ("[Builders]", 0x55FF55)]);
         let list = command("vc groups").unwrap();
         assert_eq!(list, vec!["Builders (yours): Alex, Me", "Miners: Bea"]);
-        let hud: Vec<String> = hud("key.keyboard.v").into_iter().map(|l| l.text).collect();
-        assert!(hud.contains(&"Group: Builders".to_owned()) && hud.contains(&"  with Alex".to_owned()), "{hud:?}");
+        let measure = |t: &str| t.len() as f32 * 6.0;
+        let h = hud([480.0, 270.0], &measure);
+        assert_eq!(screens::testing::texts(&h.group), vec!["Alex", "Me"]);
+        assert!(h.group_size[0] > 0.0);
 
         // The menu: a password group asks for its password, then joins.
         {
@@ -1191,11 +1407,12 @@ mod tests {
         }
         *voice().shared.status.lock().unwrap() = Status::Connected;
         menu_open(Some('v'));
-        let measure = |t: &str| t.len() as f32 * 6.0;
-        let keys = vec![("Push to talk".to_owned(), key_label(DEFAULT_PTT))];
-        let draws = menu_draw([480.0, 270.0], [0.0, 0.0], &measure, keys.clone());
+        menu_draw([480.0, 270.0], [0.0, 0.0], &measure);
+        let group = voice().menu.hit_rect(&ui::Action::Open(Screen::Group)).unwrap();
+        menu_click([group[0] + 1.0, group[1] + 1.0]);
+        let draws = menu_draw([480.0, 270.0], [0.0, 0.0], &measure);
         let has = |d: &[ui::Draw], want: &str| d.iter().any(|d| matches!(d, ui::Draw::Text(t, ..) if t == want));
-        assert!(has(&draws, "Caps Lock") && has(&draws, "Miners (password)") && has(&draws, "Alex, Me"));
+        assert!(has(&draws, "Group: Builders") && has(&draws, "Miners") && has(&draws, "(2)"), "{:?}", screens::testing::texts(&draws));
         let join = voice().menu.hit_rect(&ui::Action::Join(0x62)).unwrap();
         tick(Some(world("groups.example.net")), &none);
         menu_click([join[0] + 1.0, join[1] + 1.0]);
@@ -1209,7 +1426,52 @@ mod tests {
         assert_eq!(t.payloads, vec![proto::join_group(0x62, Some("hunter2"))].into_iter().map(|(c, d)| (c.to_owned(), d)).collect::<Vec<_>>());
         menu_key(DEFAULT_MENU, false, DEFAULT_MENU);
         assert!(menu_take_close() && !menu_is_open());
+
+        // One player's volume, dragged on Adjust Volumes, is stored and comes back.
+        menu_open(None);
+        voice().menu_action(ui::Action::Open(Screen::Volumes));
+        menu_draw([480.0, 270.0], [0.0, 0.0], &measure);
+        let r = voice().menu.hit_rect(&ui::Action::Slide(ui::Slider::Player(0xA), 0.25)).unwrap();
+        menu_click([r[0] + 4.0, r[1] + 5.0]);
+        assert!(menu_drag([r[0] + 4.0 + 0.5 * (r[2] - 8.0), r[1] + 5.0]));
+        menu_release();
+        let stored = take_store();
+        let key = volume_key(0xA);
+        assert_eq!(key, "volume.00000000-0000-0000-0000-00000000000a");
+        assert!(stored.contains(&(key.clone(), "200".into())), "{stored:?}");
+        voice().shared.controls.lock().unwrap().player_volumes.clear();
+        voice().volumes_loaded.clear();
+        tick(Some(world("groups.example.net")), &|k: &str| (k == key).then(|| "50".to_owned()));
+        assert_eq!(voice().shared.controls.lock().unwrap().player_volumes.get(&0xA), Some(&0.5));
+        voice().menu.close();
         tick(None, &none);
+    }
+
+    /// As the game's glue calls it: sprites the atlas has are drawn as
+    /// they are, the mod's missing icons from their pixels, missing vanilla
+    /// ones as plain fills.
+    #[test]
+    fn render_draws_stand_ins_for_missing_sprites() {
+        let draws = vec![
+            ui::Draw::Fill([0.0, 0.0, 4.0, 4.0], 0xFF00_0000),
+            skin::icon(skin::Icon::Mic, [0.0, 0.0, 16.0, 16.0]),
+            ui::Draw::Sprite { name: skin::BUTTON.name.into(), src: [0.0, 0.0, 200.0, 20.0], dst: [0.0, 0.0, 200.0, 20.0] },
+        ];
+        let (mut fills, mut sprites) = (0, Vec::new());
+        render(&draws, &mut |d| match d {
+            ui::Draw::Fill(..) => {
+                fills += 1;
+                true
+            }
+            ui::Draw::Text(..) => true,
+            ui::Draw::Sprite { name, .. } => {
+                sprites.push(name.clone());
+                false
+            }
+        });
+        assert_eq!(sprites.len(), 2);
+        // The icon's pixels are many fills; the button is one.
+        assert!(fills > 3, "{fills}");
     }
 
     #[test]
@@ -1218,10 +1480,14 @@ mod tests {
         s.click(0);
         s.click(3);
         s.click(6);
+        s.click(9);
+        s.click(10);
+        s.mic_device = Some("USB Mic".into());
         let stored: HashMap<_, _> = s.stored().into_iter().collect();
         let back = Settings::load(&|k| stored.get(k).cloned());
         assert_eq!(back, s);
         assert_eq!((back.mode, back.volume, back.protocol), (Mode::Voice, 125, Protocol::V26));
+        assert_eq!((back.denoise, back.hide_icons, back.speaker_device), (false, true, None));
         assert_eq!(key_label("key.keyboard.caps.lock"), "Caps Lock");
         assert_eq!(compat_key("Play.Example.net:25565"), "compat.play.example.net_25565");
     }

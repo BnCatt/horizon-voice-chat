@@ -1,5 +1,6 @@
-// Draws the voice chat menu: the connection, the controls, the hotkeys as
-// bound now, and the groups.
+// Draws the voice chat's screen on top (main, settings, groups, volumes,
+// devices) with vanilla's button, slider and text field sprites and the
+// mod's icons; a sprite the atlas lacks gets a plain stand-in.
 fn voicechat_screen(
     game: &crate::game::Game<'_>,
     batch: &mut horizon_client::hud::HudBatch,
@@ -9,15 +10,17 @@ fn voicechat_screen(
     if game.native_mod_screen() != Some(vc::ID) {
         return;
     }
-    let hotkeys = vc::HOTKEYS
-        .iter()
-        .map(|(name, what, default)| (what.to_string(), vc::key_label(&game.native_mod_key(vc::ID, name, default))))
-        .collect();
     let measure = |t: &str| game.native_text_width(t);
-    for draw in vc::menu_draw([batch.width, batch.height], screen.mouse, &measure, hotkeys) {
-        match draw {
-            vc::ui::Draw::Fill(rect, argb) => game.native_fill(batch, rect, argb),
-            vc::ui::Draw::Text(text, at, rgb, shadow) => game.native_text(batch, &text, at, rgb, shadow),
+    let draws = vc::menu_draw([batch.width, batch.height], screen.mouse, &measure);
+    vc::render(&draws, &mut |d| match d {
+        vc::ui::Draw::Fill(rect, argb) => {
+            game.native_fill(batch, *rect, *argb);
+            true
         }
-    }
+        vc::ui::Draw::Text(text, at, rgb, shadow) => {
+            game.native_text(batch, text, *at, *rgb, *shadow);
+            true
+        }
+        vc::ui::Draw::Sprite { name, src, dst } => game.native_sprite(batch, name, *src, *dst),
+    });
 }

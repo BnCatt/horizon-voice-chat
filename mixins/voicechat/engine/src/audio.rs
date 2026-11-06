@@ -3,6 +3,7 @@
 //! of their own, as they aren't `Send` everywhere.
 use crate::mix::{Mixer, Resampler};
 use crate::opus::SAMPLE_RATE;
+use crate::screens::DeviceKind;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, SizedSample, Stream, StreamConfig, SupportedStreamConfig};
 use std::collections::VecDeque;
@@ -47,19 +48,64 @@ pub struct AudioIo {
     thread: Option<JoinHandle<()>>,
 }
 
+/// The names of the system's microphones or speakers.
+pub fn device_names(kind: DeviceKind) -> Vec<String> {
+    let host = cpal::default_host();
+    let devices = match kind {
+        DeviceKind::Input => host.input_devices().map(|d| d.collect::<Vec<_>>()),
+        DeviceKind::Output => host.output_devices().map(|d| d.collect::<Vec<_>>()),
+    };
+    let mut names: Vec<String> = devices.unwrap_or_default().iter().filter_map(|d| d.name().ok()).collect();
+    names.dedup();
+    names
+}
+
+/// Which of `names` is the device `wanted`: None (the default) for none
+/// chosen, or one that is gone.
+pub fn resolve(names: &[String], wanted: Option<&str>) -> Option<usize> {
+    names.iter().position(|n| Some(n.as_str()) == wanted)
+}
+
+/// The device named `wanted` of `kind`, or the default one.
+fn pick(host: &cpal::Host, kind: DeviceKind, wanted: Option<&str>) -> Option<cpal::Device> {
+    if wanted.is_some() {
+        let devices: Vec<cpal::Device> = match kind {
+            DeviceKind::Input => host.input_devices().map(|d| d.collect()).unwrap_or_default(),
+            DeviceKind::Output => host.output_devices().map(|d| d.collect()).unwrap_or_default(),
+        };
+        let names: Vec<String> = devices.iter().map(|d| d.name().unwrap_or_default()).collect();
+        if let Some(i) = resolve(&names, wanted) {
+            return devices.into_iter().nth(i);
+        }
+        log::warn!(target: "horizon_voicechat", "Voice Chat: {wanted:?} is gone, using the default device");
+    }
+    match kind {
+        DeviceKind::Input => host.default_input_device(),
+        DeviceKind::Output => host.default_output_device(),
+    }
+}
+
 impl AudioIo {
-    pub fn start(mixer: Arc<Mutex<Mixer>>, mic: Arc<MicQueue>, devices: Arc<Mutex<Devices>>) -> Self {
+    /// The sound card's streams: the microphone and speakers named (None:
+    /// the system's default ones).
+    pub fn start(
+        mixer: Arc<Mutex<Mixer>>,
+        mic: Arc<MicQueue>,
+        devices: Arc<Mutex<Devices>>,
+        input: Option<String>,
+        output: Option<String>,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let thread = std::thread::Builder::new()
             .name("voicechat-audio".into())
             .spawn(move || {
                 let host = cpal::default_host();
-                let (output, out_info) = match open_output(&host, mixer) {
+                let (output, out_info) = match open_output(&host, mixer, output.as_deref()) {
                     Ok((s, name)) => (Some(s), Ok(name)),
                     Err(e) => (None, Err(e)),
                 };
-                let (input, in_info) = match open_input(&host, mic) {
+                let (input, in_info) = match open_input(&host, mic, input.as_deref()) {
                     Ok((s, name)) => (Some(s), Ok(name)),
                     Err(e) => (None, Err(e)),
                 };
@@ -102,8 +148,8 @@ fn choose(
         .or(default.filter(|d| usable(d.sample_format())))
 }
 
-fn open_output(host: &cpal::Host, mixer: Arc<Mutex<Mixer>>) -> Result<(Stream, String), String> {
-    let device = host.default_output_device().ok_or("no speakers")?;
+fn open_output(host: &cpal::Host, mixer: Arc<Mutex<Mixer>>, wanted: Option<&str>) -> Result<(Stream, String), String> {
+    let device = pick(host, DeviceKind::Output, wanted).ok_or("no speakers")?;
     let name = device.name().unwrap_or_else(|_| "speakers".into());
     let configs = device.supported_output_configs().map(|c| c.collect()).unwrap_or_default();
     let supported = choose(configs, device.default_output_config().ok()).ok_or("no usable speaker format")?;
@@ -152,8 +198,8 @@ fn output<T: SizedSample + Send + 'static>(
         .map_err(|e| e.to_string())
 }
 
-fn open_input(host: &cpal::Host, mic: Arc<MicQueue>) -> Result<(Stream, String), String> {
-    let device = host.default_input_device().ok_or("no microphone")?;
+fn open_input(host: &cpal::Host, mic: Arc<MicQueue>, wanted: Option<&str>) -> Result<(Stream, String), String> {
+    let device = pick(host, DeviceKind::Input, wanted).ok_or("no microphone")?;
     let name = device.name().unwrap_or_else(|_| "microphone".into());
     let configs = device.supported_input_configs().map(|c| c.collect()).unwrap_or_default();
     let supported = choose(configs, device.default_input_config().ok()).ok_or("no usable microphone format")?;
@@ -193,4 +239,17 @@ fn input<T: SizedSample + Send + 'static>(
             None,
         )
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unknown_device_is_the_default() {
+        let names = vec!["A".to_owned(), "B".to_owned()];
+        assert_eq!(resolve(&names, Some("B")), Some(1));
+        assert_eq!(resolve(&names, Some("gone")), None);
+        assert_eq!(resolve(&names, None), None);
+    }
 }

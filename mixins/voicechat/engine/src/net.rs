@@ -35,6 +35,8 @@ pub struct Controls {
     pub mic_gain: f32,
     pub volume: f32,
     pub player_volumes: HashMap<u128, f32>,
+    /// Noise suppression (rnnoise) on the microphone.
+    pub denoise: bool,
 }
 
 impl Default for Controls {
@@ -49,6 +51,7 @@ impl Default for Controls {
             mic_gain: 1.0,
             volume: 1.0,
             player_volumes: HashMap::new(),
+            denoise: true,
         }
     }
 }
@@ -353,8 +356,9 @@ fn mic_loop(socket: &UdpSocket, link: &Link, shared: &Shared, mic: &MicQueue, st
     }
     let mut tone_at: u64 = 0;
     let mut sent: u64 = 0;
+    let mut denoiser = crate::denoise::Lazy::default();
     while !stop.load(Ordering::Relaxed) {
-        let frame: Vec<f32> = if tone {
+        let mut frame: Vec<f32> = if tone {
             std::thread::sleep(Duration::from_millis(20));
             (0..FRAME)
                 .map(|_| {
@@ -374,6 +378,10 @@ fn mic_loop(socket: &UdpSocket, link: &Link, shared: &Shared, mic: &MicQueue, st
             q.drain(..FRAME).collect()
         };
         let c = shared.controls.lock().unwrap().clone();
+        // Noise suppression first, on the microphone's own level, as the mod's `MicThread`.
+        if let Ok(f) = <&mut [f32; FRAME]>::try_from(frame.as_mut_slice()) {
+            denoiser.apply(c.denoise && !tone, f);
+        }
         let mut pcm = [0i16; FRAME];
         let mut peak = 0f32;
         for (o, s) in pcm.iter_mut().zip(&frame) {

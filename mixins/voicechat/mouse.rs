@@ -1,4 +1,5 @@
-// A click on the voice chat menu: the button or field under the pointer.
+// A click on the voice chat's screen: the button, slider or field under the
+// pointer (a slider starts being dragged).
 fn voicechat_mouse(
     game: &crate::game::Game<'_>,
     screen: &crate::game::native_hooks::NativeScreenView<'_>,
